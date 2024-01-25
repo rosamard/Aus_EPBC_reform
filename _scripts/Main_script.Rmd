@@ -1,0 +1,425 @@
+---
+title: "Australia's exports of endangered species"
+author: "Rosa Mar Dominguez Martinez"
+date: "2024-01-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## load libraries
+
+```{r libraries}
+library(tidyverse)
+library(here) 
+library(janitor)
+library(readxl)
+library(ggbreak)
+library(RColorBrewer)
+library(ggsankey)
+library(scales) ## to show palettes, including hex values in the colors
+library(ggalluvial)
+library(ggpubr)
+library(ggthemes)
+here()
+```
+
+## Import data
+
+
+```{r data, echo=FALSE}
+trade <- read_csv(here("_input_data/20231113_australia_ARTIS_australia_cites_iucn.csv")) # not publicly available
+
+# production <- read_csv(here("_input_data", "FAO_fishstat/production_isscaap_species.csv")) |> 
+#   clean_names() |> 
+#   select(-unit) |>
+#   rename(country = country_name,
+#          sp_name = asfis_species_name_2, 
+#          isscaap_group = asfis_species_name_3,
+#          #isscaap_group = asfis_species_name_1,
+#          fishing_area = fao_major_fishing_area_name,
+#          # fishing_area_code = fao_major_fishing_area_code, 
+#          unit = unit_name ) |> 
+#   filter(country == "Australia") |> 
+#   pivot_longer(cols = -c(1:7), names_to = "year", values_to = "value") |> 
+#   mutate(year = gsub(pattern = "x", replacement = "", year) |> as.numeric()) 
+
+
+epbc <-  read_excel(here("_input_data/EPBC/EPBC_fauna_2023.xls")) |> clean_names() |> 
+  mutate(species = tolower(species)) 
+```
+
+
+
+```{r, join}
+
+#join trade with EPBC data
+
+trade |> filter(source_country_iso3c == "AUS") 
+  
+(trade_epbc <- trade |> 
+  filter(source_country_iso3c == "AUS") |> 
+  left_join(epbc, by = c("sciname" = "species")) |> 
+  mutate(listed = case_when(!is.na(common_name) ~ "listed", 
+                            T ~ "not_listed")))
+#species listed and exported 
+# sciname                
+#   <chr>                  
+# 1 bidyanus bidyanus      
+# 2 hoplostethus atlanticus
+# 3 maccullochella peelii  
+# 4 thunnus maccoyii       
+# 5 galeorhinus galeus     
+# 6 seriolella brama    
+
+#because bidyanus bidyanus (silver perch) and maccullochella peelii (Murray cod) are farmed, exclude them
+
+(trade_epbc <- trade |> 
+  filter(source_country_iso3c == "AUS") |> 
+  left_join(epbc, by = c("sciname" = "species")) |>
+  mutate(listed = case_when(sciname %in% c("galeorhinus galeus", "hoplostethus atlanticus", 
+                                           "thunnus maccoyii", "seriolella brama") ~ "listed", 
+                            T ~ "not_listed")) )
+```
+How much exports of EPBC - lisdted species since they were included in the Act
+```{r stats}
+
+#trade after each species was listed 
+### total volumes since they were listed 
+(listed_total <- trade_epbc |> filter(listed == "listed") |>
+  mutate(bef_af = case_when(sciname == "hoplostethus atlanticus" & year >2006 ~ "after",
+                            sciname == "galeorhinus galeus" & year > 2009 ~ "after", 
+                            sciname == "seriolella brama" & year >2015 ~ "after", 
+                            sciname == "thunnus maccoyii" & year >2010 ~ "after", 
+                            T ~ "not_listed")))
+
+#total volume of each species traded before and after they were listed
+listed_total |> 
+    group_by(sciname, bef_af) |> 
+    reframe(total = sum(live_weight_t))
+
+listed_total |> group_by(sciname, bef_af) |> 
+    reframe(total = sum(live_weight_t)) |> filter(bef_af == "after") |> reframe(tot = sum(total)) 
+# 106615.7 tonnes of all listed species traded since they were listed 
+
+listed_total |> filter(bef_af == "after", exporter_iso3c != "AUS") |>  select(exporter_iso3c) |> distinct()
+#39 countries
+listed_total |> filter(bef_af == "after", importer_iso3c != "AUS") |> select(importer_iso3c) |> distinct()
+#97 countries
+
+#Australia exports EPBC-listed species to 136 countries
+
+# % of exports of tuna 
+listed_total |> mutate(species = case_when(sciname == "thunnus maccoyii" ~ "tuna", 
+                                           T ~ "Other")) |> 
+  group_by(species) |> 
+  reframe(total = sum(live_weight_t), live_weight_t) |> 
+  select(-live_weight_t) |> distinct() 
+
+224449.21*100/(21667.55 + 224449.21)
+
+
+```
+
+transform data so there is no intermediary countries 
+```{r exporter is importer}
+#the ones imported from intermediaries 
+(importer_1<- listed_total |> 
+  filter(source_country_iso3c != exporter_iso3c) |> 
+  select(-importer_iso3c) |> 
+  rename(importer_iso3c = exporter_iso3c))
+
+#processed by australia
+(importer_2<- listed_total |> 
+  filter(source_country_iso3c == exporter_iso3c) |> 
+  select(- source_country_iso3c) |> 
+  rename(source_country_iso3c = exporter_iso3c))
+
+(no_inter <- rbind(importer_1, importer_2))
+```
+
+line fig with exports of each listed species through time
+```{r fig 1}
+# 
+# ggplot(no_inter |> filter(listed == "listed") |> mutate(common_name = case_when(sciname =="hoplostethus atlanticus" ~ "Orange Roughy", 
+#                                                                                   sciname == "galeorhinus galeus" ~ "School Shark", 
+#                                                                                   T ~ common_name)) |> 
+#          group_by(common_name, year) |> reframe(total = sum(live_weight_t))) + 
+#   geom_line(aes(x = year, y = total, color = common_name), linewidth = 1) + 
+#    scale_x_discrete(limits = c(seq(1996,2020, 5), 2020)) +
+#   scale_y_break(c(4000,6000)) +
+#    #xlim(1996, 2020) +
+#   #scale_y_break(c(800, 1000)) +
+#   scale_color_brewer(palette = "Spectral") +
+#   geom_segment(aes(x = 2000, y = -0.1, xend = 2000, yend = 12000), linewidth = 1) + #,arrow = arrow(length = unit(2, "mm"))) +  
+#   annotate("text", x = 2000, y = 12500, label = "implementation\nof EPBC Act") + 
+#   geom_segment(aes(x = 2006, y = -0.1, xend = 2006, yend = 3200), color = "grey", alpha =0.4, linetype = "dashed", linewidth = 1) +  
+#   #annotate(geom = "point", x = 2006, y = 4500) + 
+#   annotate("text", x = 2006, y = 3500, label = "Orange\nRoughy") + 
+#   geom_segment(aes(x = 2009, y = -0.1, xend = 2009, yend = 3000), color = "grey", alpha = 0.4, linetype = "dashed", linewidth = 0.9) +  
+#   #annotate(geom = "point", x = 2009, y = 5500) + 
+#   annotate("text", x = 2009, y = 3300, label = "School\nShark") + 
+#   geom_segment(aes(x = 2015, y = -0.1, xend = 2015, yend = 3200), color = "grey", alpha = 0.4, linetype = "dashed", linewidth = 1) +  
+#   #annotate(geom = "point", x = 2015, y = 4500) + 
+#   annotate("text", x = 2015, y = 3500, label = "Blue\nWarehou") +
+#   geom_segment(aes(x = 2010, y = -0.1, xend = 2010, yend = 11000),color = "grey", alpha = 0.4, linetype = "dashed", linewidth = 1) +  
+#   #annotate(geom = "point", x = 2010, y = 11500) + 
+#   annotate("text", x = 2010, y = 11300, label = "Southern\nBluefin Tuna") + 
+#   theme_pubr( base_size = 14,legend = "right") + 
+#   # theme(axis.text.x = element_text(angle = 60, hjust=1), 
+#   #       text = element_text(size=16),
+#   #       axis.title = element_text(size = 14), 
+#   #       axis.text = element_text(size = 14),
+#   #       legend.text = element_text(size=14),
+#   #       legend.key.size = unit(0.6, "cm"), 
+#   #       plot.margin = margin(1,1,1,1, "cm")) + 
+#   labs(y = "Exports live weight equivalent (T)", color = "")
+
+#ggsave("fig1_export_time_v2.pdf", device = "pdf", path = here("AusTrade_ThrSpp/figures/exports"), width = 38, height = 20, units = c("cm"), dpi = 600 )
+
+```
+
+line fig with exports of each listed species through time - square root
+```{r fig 1}
+
+ggplot(no_inter |> filter(listed == "listed") |> mutate(common_name = case_when(sciname =="hoplostethus atlanticus" ~ "Orange roughy", 
+                                                                                  sciname == "galeorhinus galeus" ~ "School shark", sciname == "thunnus maccoyii" ~ "Southern bluefin tuna", 
+                                                                                 sciname == "seriolella brama" ~ "Blue warehou", 
+                                                                                
+                                                                                  T ~ common_name)) |> 
+         group_by(common_name, year) |> reframe(total = sum(live_weight_t))) + 
+  geom_line(aes(x = year, y = sqrt(total), color = common_name), linewidth = 1) + 
+    scale_x_discrete(limits = c(seq(1996,2020, 5), 2020)) +
+   scale_y_discrete(limits = c(seq(0,110, 10))) +
+  # scale_y_break(c(4000,6000)) +
+  #  #xlim(1996, 2020) +
+  #scale_y_break(c(800, 1000)) +
+  scale_color_brewer(palette = "Spectral") +
+  geom_segment(aes(x = 2000, y = -0.1, xend = 2000, yend = 99), linewidth = 1) + #,arrow = arrow(length = unit(2, "mm"))) +  
+  annotate("text", x = 2000, y = 102, label = "implementation\nof EPBC Act") + 
+  geom_segment(aes(x = 2006, y = -0.1, xend = 2006, yend =30), color = "grey", alpha =0.4, linetype = "dashed", linewidth = 1) +  
+  #annotate(geom = "point", x = 2006, y = 4500) + 
+  annotate("text", x = 2006, y = 34, label = "Orange\nroughy") + 
+  geom_segment(aes(x = 2009, y = -0.1, xend = 2009, yend = 28), color = "grey", alpha = 0.4, linetype = "dashed", linewidth = 0.9) +  
+  #annotate(geom = "point", x = 2009, y = 5500) + 
+  annotate("text", x = 2009, y = 30, label = "School\nshark") + 
+  geom_segment(aes(x = 2010, y = -0.1, xend = 2010, yend = 102),color = "grey", alpha = 0.4, linetype = "dashed", linewidth = 1) +  
+  #annotate(geom = "point", x = 2010, y = 11500) + 
+  annotate("text", x = 2010, y = 105, label = "Southern\nbluefin tuna") +
+  geom_segment(aes(x = 2015, y = -0.1, xend = 2015, yend = 30), color = "grey", alpha = 0.4, linetype = "dashed", linewidth = 1) +  
+  #annotate(geom = "point", x = 2015, y = 4500) + 
+  annotate("text", x = 2015, y = 33, label = "Blue\nwarehou") +
+  theme_pubr(base_size = 14,legend = "right") + 
+  # theme(axis.text.x = element_text(angle = 60, hjust=1), 
+  #       text = element_text(size=16),
+  #       axis.title = element_text(size = 14), 
+  #       axis.text = element_text(size = 14),
+  #       legend.text = element_text(size=14),
+  #       legend.key.size = unit(0.6, "cm"), 
+  #       plot.margin = margin(1,1,1,1, "cm")) + 
+  labs(y = "Exports live weight equivalent (sqrt(T))", color = "")
+
+#ggsave("fig1_sqrt_export_time.pdf", device = "pdf", path = here("AusTrade_ThrSpp/figures/exports"), width = 38, height = 20, units = c("cm"), dpi = 600 )
+
+```
+
+
+trade flow data 
+change data format
+```{r flow plot}
+(epbc_trade_flow <- trade_epbc |> filter(sciname %in% c("hoplostethus atlanticus", "seriolella brama", "galeorhinus galeus")) |> 
+  mutate(bef_af = case_when(sciname == "hoplostethus atlanticus" & year >2006 ~ "after",
+                            sciname == "galeorhinus galeus" & year > 2009 ~ "after", 
+                            sciname == "seriolella brama" & year >2015 ~ "after", 
+                            sciname == "thunnus maccoyii" & year >2010 ~ "after", 
+                            T ~ "not_listed")))
+ 
+flow_df_orange<- epbc_trade_flow |> 
+  filter(sciname == "hoplostethus atlanticus", bef_af == "after") |> filter_artis(prod_method = "capture") |> 
+  mutate(sciname = "hoplostethus atlanticus")
+
+flow_df_blue<- epbc_trade_flow |> 
+  filter(sciname == "seriolella brama", bef_af == "after") |> filter_artis(prod_method = "capture") |> 
+  mutate(sciname = "seriolella brama")
+
+flow_df_school<- epbc_trade_flow |> 
+  filter(sciname == "galeorhinus galeus", bef_af == "after") |> filter_artis(prod_method = "capture") |> 
+  mutate(sciname = "galeorhinus galeus")
+
+(flow_df <- rbind(flow_df_orange, flow_df_blue, flow_df_school))
+ 
+```
+
+fig 2, trade flow alluvial plot version
+```{r}
+flow_df
+
+## try alluvial plot
+(flow_aus<- flow_df |> filter(producers == exporters & producers == "AUS") |> 
+  select(exporters, importers, sciname, total_q) |> 
+  group_by(sciname,exporters, importers) |> 
+  reframe(total = sum(total_q)) |> 
+  rename(producers = exporters))
+
+(flow_else <- flow_df |> filter(producers != exporters) |> 
+  select(producers,exporters, sciname, total_q) |> 
+  group_by(sciname,exporters, producers) |> 
+  reframe(total = sum(total_q)) |> 
+  rename(importers = exporters))
+
+all_flow<- rbind(flow_aus, flow_else)
+
+ggplot(all_flow, aes(axis1 = sciname, axis2 = importers, y = total)) + 
+  geom_flow(aes(fill = sciname, color = sciname), width = 1.95/16, knot.pos = 0.5, alpha = 0.6) +
+        geom_stratum(width = 1.95/16, , alpha = 0.4,  color = "black") +
+  #geom_alluvium(aes(fill = sciname), curve_type = "arctangent") + 
+  #geom_stratum() + 
+  geom_text(stat = "stratum", aes(label =after_stat(stratum))) + 
+  #scale_fill_hue(labels = c("Galeorhinus galeus", "Hoplostethus atlanticus", "Seriolella brama")) + 
+  scale_fill_viridis_d() + 
+  scale_color_viridis_d() +
+  scale_x_discrete(limits = c("exported taxa", "importers"),
+                   expand = c(0.18, 0.08)) +
+  scale_y_continuous(breaks = NULL)+
+  theme_hc() + 
+  guides(fill = guide_legend(title = "Exported taxa")) + 
+  theme(axis.text.x = element_text(vjust = 7, face="bold", size=12, color="black"), 
+        #axis.title.x = element_text(face="bold", size=16, color="black"),
+        axis.text.y = element_text(face="bold", size=12, color="black"),
+        axis.title.y = element_blank(),
+        strip.text = element_text(size=10, face="bold"),
+        plot.title = element_text(size=20, face="bold"),
+        legend.position = "none")
+
+#ggsave("alluvial_flow.png", device = "png", path = "AusTrade_ThrSpp/figures/exports/", width = 50, height = 30, units = c("cm"), dpi = 400 )
+```
+
+Species IUCN and EPBC
+```{r, table}
+
+# table with sciname, common name, EPBC listing, IUCN listing, year of listing, volume
+
+table_dat_epbc <- trade_epbc |> filter(listed == "listed") |> group_by(sciname, year) |> 
+  mutate(bef_af = case_when(sciname == "hoplostethus atlanticus" & year >2006 ~ "after",
+                            sciname == "galeorhinus galeus" & year > 2009 ~ "after", 
+                            sciname == "seriolella brama" & year >2015 ~ "after", 
+                            sciname == "thunnus maccoyii" & year >2010 ~ "after", 
+                            T ~ "before"), 
+         iucn_epbc = "EPBC", 
+         listing_date = case_when(sciname == "hoplostethus atlanticus" ~ 2006,
+                            sciname == "galeorhinus galeus"~ 2009, 
+                            sciname == "seriolella brama" ~2015, 
+                            sciname == "thunnus maccoyii" ~2010, 
+                            T ~ NA)) |> 
+  group_by(sciname, bef_af) |> 
+  reframe(total_exported = sum(live_weight_t), common_name, listing_date, iucn_epbc, iucn_redlist_category) |> unique()
+
+
+table_dat_iucn <- trade_epbc |> 
+  filter(method == "capture", 
+         iucn_redlist_category %in% c("Critically Endangered", "Endangered", "Near Threatened", "Vulnerable"), 
+         sciname != c("hoplostethus atlanticus", "galeorhinus galeus", "seriolella brama","thunnus maccoyii")) |> 
+  mutate(listing_date = case_when(sciname == "galeorhinus galeus" ~ 2000, 
+                                  sciname == "thunnus maccoyii" ~ 1996, 
+                                  sciname == "anguilla australis" ~ 2019, 
+                                  sciname == "atractoscion aequidens" ~ 2020, 
+                                  sciname == "bathyraja irrasa" ~ 2009, 
+                                  sciname == "bidyanus bidyanus" ~ 1996, 
+                                  sciname == "carcharhinus amboinensis" ~ 2000,    ## DD before 2021
+                                  sciname == "carcharhinus sorrah" ~ 2009,
+                                  sciname == "cherax destructor" ~ 1996,  #not assessed since
+                                  sciname == "eusphyra blochii" ~ 2003, 
+                                  sciname == "haliotis rubra" ~ 2021, 
+                                  sciname == "istiophorus platypterus" ~ 2022, # 2011 least concern 
+                                  sciname == "lamna nasus" ~ 1996, 
+                                  sciname == "makaira nigricans" ~ 2011, 
+                                  sciname == "pomatomus saltatrix" ~ 2015, 
+                                  sciname == "rhizoprionodon acutus" ~ 2020, #2003 LC, 
+                                  sciname == "scomberomorus commerson" ~ 2011,
+                                  sciname == "somniosus pacificus" ~ 2009, #DD before 2021
+                                  sciname == "thunnus obesus" ~ 1996, 
+                                  sciname == "xiphias gladius" ~ 1996, 
+                                  T ~ NA),                           
+         common_name = case_when(sciname == "anguilla australis" ~ "shortfin eel", 
+                                 sciname == "atractoscion aequidens" ~ "african weakfish", 
+                                 sciname == "bathyraja irrasa" ~ "kerguelen sandpaper skate", 
+                                 sciname == "bidyanus bidyanus" ~ "silver perch", 
+                                 sciname == "carcharhinus amboinensis" ~ "pigeye shark",
+                                 sciname == "carcharhinus sorrah" ~ "spottal shark",
+                                 sciname == "eusphyra blochii" ~ "winghead shark",
+                                 sciname == "haliotis rubra" ~ "blacklip abalone", 
+                                 sciname == "istiophorus platypterus" ~ "sailfish", 
+                                 sciname == "lamna nasus" ~ "porbeagle", 
+                                 sciname == "makaira nigricans" ~ "blue marlin", 
+                                 sciname == "pomatomus saltatrix" ~ "blue fish", 
+                                 sciname == "rhizoprionodon acutus" ~ "milk shark", 
+                                 sciname == "scomberomorus commerson" ~ "narrow-barred spanish mackerel", 
+                                 sciname == "somniosus pacificus" ~ "pacific sleeper shark", 
+                                 sciname == "thunnus obesus" ~ "bigeye tuna",
+                                 sciname == "thunnus maccoyii" ~ "southern bluefin tuna",
+                                 sciname == "xiphias gladius" ~ "swordfish", 
+                                 sciname == "galeorhinus galeus" ~ "school shark",
+                                 T ~ sciname), 
+         iucn_epbc = "IUCN",
+         bef_af = case_when(year > listing_date ~ "after", 
+                            T ~ "before")) |> 
+  group_by(sciname, bef_af) |>
+  reframe(total_exported = sum(live_weight_t), common_name, listing_date, iucn_epbc, iucn_redlist_category) |> unique()
+
+table_listed <-table_dat_epbc |> 
+  rbind(table_dat_iucn) |> distinct()
+
+
+#write.csv(table_listed, here("tables/exported_vols_iucn-epbc.csv"), row.names = FALSE)
+
+## porbeagle 
+
+porbeagle<- trade_epbc |> filter(grepl("lamna", sciname)) |> mutate(bef_af = case_when(year > 2009 ~ "after", 
+                                                                                       T~ "before")) |> 
+  group_by(year, bef_af) |> 
+  reframe(total = sum(live_weight_t))
+
+
+
+```
+
+Other species nominated for EPBC 
+```{r, nominated sp}
+
+#### species proposed####
+
+not_assessed <-read_excel(here("_input_data/EPBC/EPBC_nominated_sp_11Dec2023.xlsx"), sheet = 1) |> 
+  clean_names() |> mutate(sciname = tolower(species_name)) |> 
+  select(-species_name)
+
+not_assessed_trade <- not_assessed |> left_join(trade_epbc, by = "sciname", relationship = "many-to-many") |> 
+  filter(!is.na(source_country_iso3c))
+
+assessed <- read_excel(here("_input_data/EPBC/EPBC_nominated_sp_11Dec2023.xlsx"), sheet = 2) |> 
+  clean_names() |> mutate(sciname = tolower(sciname))
+
+assessed_trade <- assessed |> left_join(trade_epbc, by = "sciname", relationship = "many-to-many") |> 
+  filter(!is.na(source_country_iso3c))
+
+```
+
+```{r, CITES}
+
+# check with CITES 
+
+CITES <- read_csv(here("_input_data/Index_of_CITES_Species_2024-01-03 05 25.csv")) |> 
+  filter(Kingdom == "Animalia") |> 
+  mutate(sciname = tolower(FullName)) |> 
+    select(sciname, CurrentListing, CitesAccepted)
+
+CITES_epbc <- trade_epbc |> 
+  left_join(CITES, by = "sciname") 
+
+CITES_epbc |> filter(!is.na(CurrentListing)) |> count(sciname, CurrentListing, year)
+
+
+#none of these species were traded before they were listed 
+#https://checklist.cites.org/#/en/search/output_layout=alphabetical&level_of_listing=0&show_synonyms=1&show_author=1&show_english=1&show_spanish=1&show_french=1&scientific_name=&page=1&per_page=20
+```
